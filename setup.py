@@ -34,7 +34,7 @@ if __name__ == "__main__":
 
     INCLUDE_DIRS = [ROOT_DIR + "/" + dir for dir in INCLUDE_DIRS]
 
-    DEBUG = False
+    DEBUG = True
 
     def ncond(s) -> list:
         if DEBUG:
@@ -53,8 +53,8 @@ if __name__ == "__main__":
     NVCC_FLAGS = [
         "-DENABLE_BF16=1",
         "-DBUILD_NUNCHAKU=1",
-        "-gencode", "arch=compute_86,code=sm_86",
-        "-gencode", "arch=compute_89,code=sm_89",
+        "-gencode", "arch=compute_80,code=sm_80",
+        # "-gencode", "arch=compute_89,code=sm_89",
         "-g",
         "-std=c++20",
         "-UNDEBUG",

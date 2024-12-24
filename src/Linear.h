@@ -63,7 +63,7 @@ public:
 
     const Tensor::ScalarType dtype;
 
-protected:
+public:
     virtual void loadParam(std::string key, Tensor &dst, Tensor src) override;
 
 public:

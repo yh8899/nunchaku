@@ -36,10 +36,17 @@ public:
         Tensor::synchronizeDevice();
     }
 
+    void loadParam(std::string key, torch::Tensor src) {
+        checkModel();
+
+        net->loadParam(key, *(net->params[key].tensor), from_torch(src));
+        Tensor::synchronizeDevice();
+    }
+
     torch::Tensor forward(torch::Tensor x) {
         checkModel();
 
-        std::cerr << "QuantizedGEMM forward" << std::endl;
+        spdlog::info("QuantizedGEMM forward");
 
         x = x.contiguous();
 
@@ -244,4 +251,155 @@ private:
 private:
     std::unique_ptr<GEMM_W4A4> net;
     std::unique_ptr<DebugContext> debugContext;
+};
+
+class QuantizedGEMMW4A4 { // : public torch::CustomClassHolder {
+public:
+    QuantizedGEMMW4A4() {
+        spdlog::info("Initializing QuantizedGEMMW4A4");
+        size_t val = 0;
+        checkCUDA(cudaDeviceSetLimit(cudaLimitStackSize, 8192));
+        checkCUDA(cudaDeviceGetLimit(&val, cudaLimitStackSize));
+        spdlog::info("Stack size={}", val);
+    }
+
+    GEMM_W4A4::QuantizedActivation quantize(Tensor input, Tensor lora_down, Tensor smooth) {
+        spdlog::info("QuantizedGEMM quantize");
+
+        const int M = input.numel() / input.shape[-1];
+        const int K = input.shape[-1];
+
+        auto shape = TensorShape(input.shape.dataExtent);
+        shape[-1] = K / 2;
+
+        const int lora_rank = lora_down.shape[-1];
+
+        spdlog::info("Quantize: M={}, K={}, lora_rank={}", M, K, lora_rank);
+        
+        GEMM_W4A4::QuantizedActivation qact;
+        qact.act = Tensor::allocate(shape, Tensor::INT8, input.device());
+        qact.ascales = Tensor::allocate({K / 64, M}, input.dtype(), input.device());    // group_size=64
+        qact.lora_act = Tensor::allocate({M, lora_rank}, Tensor::FP32, input.device());
+        qact.is_unsigned = false;
+
+        quantize_w4a4_act_fuse_lora(input, qact.act, qact.ascales, lora_down, qact.lora_act, smooth);
+
+        return qact;
+    }
+
+    void quantize_pack_w4a4_wgt(
+        torch::Tensor input,
+        torch::Tensor output,
+        torch::Tensor oscales
+    ) {
+        spdlog::info("QuantizedGEMM quantize_w4a4_wgt");
+        quantize_w4a4_wgt(from_torch(input), from_torch(output), from_torch(oscales));
+        Tensor::synchronizeDevice();
+    }
+    
+    torch::Tensor gemm(
+        c10::optional<torch::Tensor> act,           // act [M, K]
+        c10::optional<torch::Tensor> wgt,           // packed weight [N, K / 2]
+        c10::optional<torch::Tensor> wscales,       // packed [K / 64, N]
+        c10::optional<torch::Tensor> lora_up,       // packed [N, R]
+        c10::optional<torch::Tensor> lora_down,     // packed [K, R]
+        // c10::optional<torch::Tensor> bias,       // [N]
+        c10::optional<torch::Tensor> smooth_factor, // [K], for quantization
+        std::vector<float> lora_scales              // [R / 16]
+    ) {
+        auto getTensor = [](c10::optional<torch::Tensor> &t) {
+            Tensor ret = t.has_value() ? from_torch(t.value().contiguous()) : Tensor{};
+            if (ret.valid()) {
+                std::cerr << "  " << ret.shape.str() << std::endl;
+            } else {
+                std::cerr << "  <invalid>" << std::endl;
+            }
+            return ret;
+        };
+        spdlog::debug("QuantizedGEMM act quantize");
+        auto input = getTensor(act);
+        auto smooth = getTensor(smooth_factor);
+        auto _lora_down = getTensor(lora_down);
+        
+        const int M = input.numel() / input.shape[-1];
+        const int K = input.shape[-1];
+        const int lora_rank = 32;
+
+        auto device = input.device();
+        auto dtype = input.dtype();
+
+        spdlog::info("Quantize: M={}, K={}, lora_rank={}", M, K, lora_rank);
+        
+        GEMM_W4A4::QuantizedActivation qact;
+
+        auto qact_shape = TensorShape(input.shape.dataExtent);
+        qact_shape[-1] = K / 2;
+        qact.act = Tensor::allocate(qact_shape, Tensor::INT8, device, true);
+        qact.ascales = Tensor::allocate({K / 64, M}, dtype, device, true);    // group_size=64
+        qact.lora_act = Tensor::allocate({M, lora_rank}, Tensor::FP32, device, true);
+        qact.is_unsigned = false;
+
+        spdlog::debug("Quantize: input={}, qact.act={}, qact.ascales={}, qact.lora_act={}", input.shape.str(), qact.act.shape.str(), qact.ascales.shape.str(), qact.lora_act.shape.str());
+        quantize_w4a4_act_fuse_lora(input, qact.act, qact.ascales, _lora_down, qact.lora_act, smooth);
+        // quantize_w4a4_act(input, qact.act, qact.ascales);
+        // auto qoutput = to_torch(qact.act);
+        // Tensor::synchronizeDevice();
+        // return qoutput;
+
+        auto qweight = getTensor(wgt);
+        auto _lora_up = getTensor(lora_up);
+        auto _wscales = getTensor(wscales);
+
+        const int N = _lora_up.shape[0];
+    
+        Tensor out;
+        Tensor bias;
+        GEMM_W4A4::QuantizedActivation qout;
+        Tensor next_lora;
+        Tensor next_smooth;
+        
+        auto shape = TensorShape(qact.act.shape.dataExtent);
+        shape[-1] = N;
+        out = Tensor::allocate(shape, dtype, device);
+        
+        // spdlog::info(qweight.shape.str());
+        // spdlog::info(_wscales.shape.str());
+        // spdlog::info(out.shape.str());
+        // spdlog::info(qact.act.shape.str());
+        // spdlog::info(qact.ascales.shape.str());
+        // spdlog::info(qact.lora_act.shape.str());
+        // spdlog::info(_lora_up.shape.str());
+        // spdlog::info(_lora_down.shape.str());
+        // spdlog::info(qout.act.shape.str());
+        // spdlog::info(qout.ascales.shape.str());
+        // spdlog::info(qout.lora_act.shape.str());
+        // spdlog::info(bias.shape.str());
+        // spdlog::info(next_smooth.shape.str());
+        // spdlog::info("QuantizedGemm: qact.is_unsigned={}", qact.is_unsigned);
+        gemm_w4a4(
+            qact.act,
+            qweight,
+            out,
+            {},
+            qact.ascales,
+            _wscales,
+            {},
+            {},
+            qact.lora_act,
+            _lora_up,
+            {},
+            {},
+            {},
+            {},
+            {},
+            bias,
+            {},
+            qact.is_unsigned,
+            lora_scales
+        );
+        torch::Tensor output = to_torch(out);
+        Tensor::synchronizeDevice();
+
+        return output;
+    }
 };

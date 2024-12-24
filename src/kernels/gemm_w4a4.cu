@@ -74,13 +74,13 @@ public:
     using typename Config::half_t;
     using typename Config::half2_t;
 
-    static constexpr int WARP_M = BLOCK_M / NUM_WARPS;
-    static constexpr int WARP_N = BLOCK_N;
-    static constexpr int WARP_K = INSN_K;
+    static constexpr int WARP_M = BLOCK_M / NUM_WARPS;  // 256/8 = 32
+    static constexpr int WARP_N = BLOCK_N;              // 128
+    static constexpr int WARP_K = INSN_K;               // 64
 
-    static constexpr int WARP_M_TILES = WARP_M / INSN_M;
-    static constexpr int WARP_N_TILES = WARP_N / INSN_N;
-    static constexpr int WARP_K_TILES = WARP_K / INSN_K;
+    static constexpr int WARP_M_TILES = WARP_M / INSN_M;// 32/16 = 2
+    static constexpr int WARP_N_TILES = WARP_N / INSN_N;// 128/16 = 8
+    static constexpr int WARP_K_TILES = WARP_K / INSN_K;// 64/64 = 1
 
     /**
      * refer to https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#mma-16864-c
@@ -114,9 +114,9 @@ public:
      * max pack size set to 8 since max load size is 16 bytes / lane
      * min pack size set to 2 since shuffle granularity is 32b 2*half
      * */ 
-    static constexpr int WSCALES_PACK_SIZE = clamp(WARP_N / WARP_SIZE, 4 / sizeof(half), 16 / sizeof(half));
-    static constexpr int WSCALES_NUM_PACKS = ceilDiv(WARP_N, (WSCALES_PACK_SIZE * WARP_SIZE));
-    static constexpr int WSCALES_VALID_LANES = std::min(WARP_SIZE, WARP_N / WSCALES_PACK_SIZE);
+    static constexpr int WSCALES_PACK_SIZE = clamp(WARP_N / WARP_SIZE, 4 / sizeof(half), 16 / sizeof(half));    // 4
+    static constexpr int WSCALES_NUM_PACKS = ceilDiv(WARP_N, (WSCALES_PACK_SIZE * WARP_SIZE));                  // 1
+    static constexpr int WSCALES_VALID_LANES = std::min(WARP_SIZE, WARP_N / WSCALES_PACK_SIZE);                 // 32
 
     /**
      * ascales store order: (pack = 2)
@@ -135,9 +135,9 @@ public:
      * 
      * {k}-th wscale used by lane {i} => {k // (ASCALES_PACK_SIZE * WARP_SIZE)}-th pack, in lane {8*(k // ASCALES_PACK_SIZE) + i // 4}, element {k % ASCALES_PACK_SIZE}
      */
-    static constexpr int ASCALES_PACK_SIZE = clamp(WARP_M / WARP_SIZE, 4 / sizeof(half), 16 / sizeof(half));
-    static constexpr int ASCALES_NUM_PACKS = ceilDiv(WARP_M, (ASCALES_PACK_SIZE * WARP_SIZE));
-    static constexpr int ASCALES_VALID_LANES = std::min(WARP_SIZE, WARP_M / ASCALES_PACK_SIZE);
+    static constexpr int ASCALES_PACK_SIZE = clamp(WARP_M / WARP_SIZE, 4 / sizeof(half), 16 / sizeof(half));    // 2
+    static constexpr int ASCALES_NUM_PACKS = ceilDiv(WARP_M, (ASCALES_PACK_SIZE * WARP_SIZE));                  // 1
+    static constexpr int ASCALES_VALID_LANES = std::min(WARP_SIZE, WARP_M / ASCALES_PACK_SIZE);                 // 16
 
     using packed_act_t = uint4;
     using packed_wgt_t = uint4;
@@ -1317,10 +1317,10 @@ public:
     struct Lora {
         static_assert(rank % 16 == 0);
 
-        static constexpr int LORA_RANK = rank;
-        static constexpr int LORA_M_TILES = WARP_M / 16;
-        static constexpr int LORA_R_TILES = LORA_RANK / 16;
-        static constexpr int LORA_N_TILES = WARP_N / 16;
+        static constexpr int LORA_RANK = rank;                  // 32   
+        static constexpr int LORA_M_TILES = WARP_M / 16;        // 2
+        static constexpr int LORA_R_TILES = LORA_RANK / 16;     // 2
+        static constexpr int LORA_N_TILES = WARP_N / 16;        // 8
 
         static_assert(LORA_M_TILES == WARP_M_TILES);
         static_assert(LORA_N_TILES == WARP_N_TILES);
@@ -2707,6 +2707,9 @@ void gemm_w4a4(
     int N = wgt.shape[0];
     int K = act.shape[-1] * 2;
     assert(K == wgt.shape[1] * 2);
+
+    // spdlog::info("ASCALES_PACK_SIZE={}, ASCALES_NUM_PACKS={}, ASCALES_VALID_LANES={}", GEMM::ASCALES_PACK_SIZE, GEMM::ASCALES_NUM_PACKS, GEMM::ASCALES_VALID_LANES);
+    // spdlog::info("wscales_pack_size = {}, WSCALES_NUM_PACKS={}, WSCALES_VALID_LANES={}", GEMM::WSCALES_PACK_SIZE, GEMM::WSCALES_NUM_PACKS, GEMM::WSCALES_VALID_LANES);
 
     // spdlog::info("M={} N={} K={}", M, N, K);
     // spdlog::info("act at {}", act.data_ptr());

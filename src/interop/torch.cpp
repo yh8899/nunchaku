@@ -23,6 +23,7 @@ Tensor from_torch(at::Tensor input) {
 
     static const std::map<at::ScalarType, Tensor::ScalarType> mapType = {
         { at::ScalarType::Byte, Tensor::INT8 },
+        { at::ScalarType::Char, Tensor::INT8 },
         { at::ScalarType::Int, Tensor::INT32 },
         { at::ScalarType::Long, Tensor::INT64 },
         { at::ScalarType::Float, Tensor::FP32 },
